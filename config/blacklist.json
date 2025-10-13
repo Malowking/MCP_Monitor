@@ -1,0 +1,26 @@
+{
+  "blocked_tools": [
+    {
+      "tool_name": "rm_rf",
+      "reason": "Dangerous system operation",
+      "permanent": true
+    },
+    {
+      "tool_name": "format_disk",
+      "reason": "Destructive operation",
+      "permanent": true
+    }
+  ],
+  "blocked_parameters": [
+    {
+      "pattern": ".*password.*",
+      "case_sensitive": false,
+      "reason": "Potential sensitive data"
+    },
+    {
+      "pattern": ".*credit_card.*",
+      "case_sensitive": false,
+      "reason": "Financial sensitive data"
+    }
+  ]
+}

@@ -1,0 +1,38 @@
+{
+  "rules": [
+    {
+      "rule_id": "R001",
+      "name": "File deletion check",
+      "condition": {
+        "tool_name_pattern": ".*delete.*|.*remove.*",
+        "parameter_check": {
+          "path": ".*/(root|system|etc).*"
+        }
+      },
+      "action": "force_confirm",
+      "risk_score": 0.9
+    },
+    {
+      "rule_id": "R002",
+      "name": "Network request to external",
+      "condition": {
+        "tool_name_pattern": ".*fetch.*|.*request.*",
+        "parameter_check": {
+          "url": "^https?://(?!localhost|127\\.0\\.0\\.1).*"
+        }
+      },
+      "action": "confirm_if_first_time",
+      "risk_score": 0.5
+    },
+    {
+      "rule_id": "R003",
+      "name": "Database write operations",
+      "condition": {
+        "tool_name_pattern": ".*(insert|update|delete|drop|truncate).*",
+        "parameter_check": {}
+      },
+      "action": "log_and_confirm",
+      "risk_score": 0.7
+    }
+  ]
+}
