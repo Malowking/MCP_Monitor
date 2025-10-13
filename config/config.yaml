@@ -6,8 +6,8 @@ database:
     host: "localhost"
     port: 5432
     database: "mcp_monitor"
-    user: "postgres"
-    password: "your_password"
+    user: "00568200"  # 使用当前系统用户
+    password: ""
     pool_size: 10
     max_overflow: 20
 
@@ -25,9 +25,10 @@ risk_assessment:
 # 工具分层配置
 tool_layers:
   L1_core_tools:
-    - "search"
-    - "calculate"
-    - "get_time"
+    tools:
+      - "search"
+      - "calculate"
+      - "get_time"
     always_loaded: true
 
   L2_domain_tools:
@@ -40,9 +41,10 @@ tool_layers:
     always_loaded: false
 
   L3_high_risk_tools:
-    - "delete_file"
-    - "execute_command"
-    - "make_payment"
+    tools:
+      - "delete_file"
+      - "execute_command"
+      - "make_payment"
     require_explicit_auth: true
 
 # MCP服务配置
@@ -61,9 +63,9 @@ mcp_services:
 # 模型配置
 model:
   openai_compatible:
-    api_base: "http://localhost:11434/v1"  # 兼容OpenAI格式的API端点
-    api_key: "your_api_key"
-    model_name: "gpt-4"
+    api_base: "https://dashscope.aliyuncs.com/compatible-mode/v1"  # 兼容OpenAI格式的API端点
+    api_key: "sk-aa3444bc6b9d43fc889c6b10bae06448"
+    model_name: "qwen3-max"
     temperature: 0.7
     max_tokens: 2000
 
