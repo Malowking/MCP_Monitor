@@ -1,0 +1,98 @@
+# MCP Monitor Configuration Template
+# 复制此文件为 config.yaml 并填入你的实际配置
+
+# 数据库配置
+database:
+  postgresql:
+    host: "localhost"
+    port: 5432
+    database: "mcp_monitor"
+    user: "your_postgres_user"  # 改为你的PostgreSQL用户名
+    password: "your_password"     # 如需要，填入密码
+    pool_size: 10
+    max_overflow: 20
+
+  faiss:
+    index_path: "./data/faiss_index"  # 自定义Faiss索引存储路径
+    dimension: 1536  # OpenAI embedding维度
+    index_type: "IVFFlat"  # 索引类型: Flat, IVFFlat, HNSW
+    nlist: 100  # IVFFlat参数
+
+# 风险评估阈值
+risk_assessment:
+  confirmation_threshold: 0.6  # 高于此阈值需要用户确认
+  high_risk_threshold: 0.8     # 高风险操作阈值
+
+# 工具分层配置
+tool_layers:
+  L1_core_tools:
+    tools:
+      - "search"
+      - "calculate"
+      - "get_time"
+    always_loaded: true
+
+  L2_domain_tools:
+    weather:
+      - "get_weather"
+      - "get_location"
+    email:
+      - "send_email"
+      - "read_email"
+    always_loaded: false
+
+  L3_high_risk_tools:
+    tools:
+      - "delete_file"
+      - "execute_command"
+      - "make_payment"
+    require_explicit_auth: true
+
+# MCP服务配置
+mcp_services:
+  max_services: 50
+  health_check_interval: 30  # 秒
+  timeout: 10  # 秒
+  retry_attempts: 3
+
+  # 熔断配置
+  circuit_breaker:
+    failure_threshold: 5  # 失败次数阈值
+    timeout_duration: 60  # 熔断持续时间（秒）
+    half_open_requests: 3  # 半开状态测试请求数
+
+# 模型配置
+model:
+  openai_compatible:
+    # 支持的API端点示例：
+    # - OpenAI: https://api.openai.com/v1
+    # - Ollama: http://localhost:11434/v1
+    # - 阿里云通义千问: https://dashscope.aliyuncs.com/compatible-mode/v1
+    # - Azure OpenAI: https://your-resource.openai.azure.com/
+    api_base: "http://localhost:11434/v1"  # 改为你的API端点
+    api_key: "your_api_key_here"           # 填入你的API密钥
+    model_name: "gpt-4"                    # 改为你的模型名称
+    temperature: 0.7
+    max_tokens: 2000
+
+  embedding:
+    api_base: "http://localhost:11434/v1"
+    api_key: "your_api_key_here"
+    model_name: "text-embedding-ada-002"
+
+# RAG配置
+rag:
+  top_k: 5  # 检索top k相似结果
+  similarity_threshold: 0.75  # 相似度阈值
+
+# 规则引擎配置
+rule_engine:
+  blacklist_file: "./config/blacklist.json"
+  rules_file: "./config/rules.json"
+
+# 日志配置
+logging:
+  level: "INFO"
+  file: "./logs/mcp_monitor.log"
+  max_bytes: 10485760  # 10MB
+  backup_count: 5
