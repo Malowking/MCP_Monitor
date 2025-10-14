@@ -3,8 +3,10 @@ FastAPI路由 - API接口定义
 """
 from typing import List, Optional, Dict, Any
 from fastapi import APIRouter, HTTPException, Depends
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 from loguru import logger
+import json
 
 from models.base_model import Message
 
@@ -102,6 +104,67 @@ async def process_query(
     except Exception as e:
         logger.error(f"Error processing query: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/query/stream")
+async def process_query_stream(
+    request: QueryRequest,
+    orchestrator = Depends(get_orchestrator)
+):
+    """
+    流式处理用户查询
+
+    返回Server-Sent Events (SSE)格式的流式响应，包含：
+    1. 实时模型回复
+    2. 工具调用信息
+    3. 风险评估结果
+    4. 最终决策
+
+    流程：
+    1. 工具路由
+    2. 流式模型生成
+    3. 实时风险评估
+    4. 返回流式结果
+    """
+    async def generate_stream():
+        try:
+            # 转换上下文
+            context = None
+            if request.context:
+                context = [Message(**msg) for msg in request.context]
+
+            # 开始流式处理
+            yield f"data: {json.dumps({'type': 'start', 'message': '开始处理您的问题...'})}\n\n"
+
+            # 流式处理查询
+            async for chunk in orchestrator.process_query_stream(
+                user_id=request.user_id,
+                user_question=request.question,
+                conversation_context=context
+            ):
+                yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
+
+            # 结束标记
+            yield f"data: {json.dumps({'type': 'end', 'message': '处理完成'})}\n\n"
+
+        except Exception as e:
+            logger.error(f"Error in stream processing: {e}")
+            error_data = {
+                'type': 'error',
+                'error': str(e),
+                'message': '处理过程中出现错误'
+            }
+            yield f"data: {json.dumps(error_data, ensure_ascii=False)}\n\n"
+
+    return StreamingResponse(
+        generate_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no"
+        }
+    )
 
 
 @router.post("/confirm")
@@ -331,6 +394,104 @@ async def get_user_history(
 
     except Exception as e:
         logger.error(f"Error getting user history: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/execution-result/{request_id}")
+async def get_execution_result(
+    request_id: str,
+    orchestrator = Depends(get_orchestrator)
+):
+    """
+    获取特定请求的详细执行结果
+
+    Args:
+        request_id: 请求ID
+
+    Returns:
+        详细执行结果
+    """
+    try:
+        # 从数据库获取详细记录
+        history = await orchestrator.db.get_tool_call_history(request_id)
+
+        if not history:
+            raise HTTPException(status_code=404, detail="Request not found")
+
+        return {
+            "request_id": history.request_id,
+            "user_id": history.user_id,
+            "user_question": history.user_question,
+            "tool_name": history.tool_name,
+            "tool_parameters": history.tool_parameters,
+            "risk_score": history.risk_score,
+            "user_confirmed": history.user_confirmed,
+            "user_feedback": history.user_feedback,
+            "execution_success": history.execution_success,
+            "execution_result": history.execution_result,
+            "confirmation_reason": history.confirmation_reason,
+            "conversation_context": history.conversation_context,
+            "created_at": history.created_at.isoformat(),
+            "confirmed_at": history.confirmed_at.isoformat() if history.confirmed_at else None,
+            "executed_at": history.executed_at.isoformat() if history.executed_at else None
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error getting execution result: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.get("/execution-results/{user_id}")
+async def get_user_execution_results(
+    user_id: str,
+    limit: int = 10,
+    include_failed: bool = True,
+    orchestrator = Depends(get_orchestrator)
+):
+    """
+    获取用户的所有执行结果，包含详细信息
+
+    Args:
+        user_id: 用户ID
+        limit: 返回记录数量
+        include_failed: 是否包含失败的执行
+
+    Returns:
+        执行结果列表
+    """
+    try:
+        histories = await orchestrator.db.get_user_tool_history(
+            user_id=user_id,
+            limit=limit
+        )
+
+        results = []
+        for h in histories:
+            if not include_failed and not h.execution_success:
+                continue
+
+            results.append({
+                "request_id": h.request_id,
+                "user_question": h.user_question,
+                "tool_name": h.tool_name,
+                "tool_parameters": h.tool_parameters,
+                "execution_success": h.execution_success,
+                "execution_result": h.execution_result,
+                "risk_score": h.risk_score,
+                "created_at": h.created_at.isoformat(),
+                "executed_at": h.executed_at.isoformat() if h.executed_at else None
+            })
+
+        return {
+            "user_id": user_id,
+            "total": len(results),
+            "execution_results": results
+        }
+
+    except Exception as e:
+        logger.error(f"Error getting user execution results: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
