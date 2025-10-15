@@ -2,9 +2,10 @@
 主流程编排器 - 整合所有组件处理用户请求
 """
 import uuid
-from typing import Dict, Any, List, Optional
+from typing import Dict, Any, List, Optional, AsyncGenerator
 from datetime import datetime
 from loguru import logger
+import json
 
 from database import DatabaseManager
 from models.base_model import BaseModel, Message, ToolDefinition
@@ -399,3 +400,317 @@ class MCPOrchestrator:
         )
 
         logger.info(f"Recorded execution result for {request_id}: {execution_success}")
+
+    async def process_query_stream(
+        self,
+        user_id: str,
+        user_question: str,
+        conversation_context: Optional[List[Message]] = None
+    ) -> AsyncGenerator[Dict[str, Any], None]:
+        """
+        流式处理用户查询
+
+        Args:
+            user_id: 用户ID
+            user_question: 用户问题
+            conversation_context: 对话上下文
+
+        Yields:
+            Dict[str, Any]: 流式响应数据
+        """
+        request_id = str(uuid.uuid4())
+        logger.info(f"Processing stream query {request_id}: {user_question[:50]}...")
+
+        try:
+            # 步骤1: 工具路由
+            yield {
+                'type': 'progress',
+                'step': 'tool_routing',
+                'message': '🔍 正在分析您的问题，选择合适的工具...',
+                'request_id': request_id
+            }
+
+            routing_result = await self.tool_router.route_tools(
+                user_question=user_question,
+                user_id=user_id
+            )
+
+            available_tools = routing_result["total_tools"]
+            yield {
+                'type': 'routing_complete',
+                'message': f'✅ 发现 {len(available_tools)} 个相关工具',
+                'tools_count': len(available_tools),
+                'detected_intents': routing_result["detected_intents"],
+                'active_domains': routing_result["active_domains"]
+            }
+
+            # 步骤2: 准备模型生成
+            yield {
+                'type': 'progress',
+                'step': 'model_generation',
+                'message': '🤖 AI正在分析并生成回复...'
+            }
+
+            messages = conversation_context or []
+            messages.append(Message(role="user", content=user_question))
+
+            # 转换工具格式
+            tool_definitions = [
+                ToolDefinition(
+                    type="function",
+                    function=tool.get("function") or tool
+                )
+                for tool in available_tools
+            ]
+
+            # 检查是否支持流式生成
+            if hasattr(self.model, 'generate_stream'):
+                # 流式模型生成
+                content_buffer = ""
+                async for chunk in self.model.generate_stream(
+                    messages=messages,
+                    tools=tool_definitions if tool_definitions else None
+                ):
+                    content_buffer += chunk
+                    yield {
+                        'type': 'model_stream',
+                        'chunk': chunk,
+                        'content': content_buffer
+                    }
+
+                # 使用缓冲的内容来模拟完整响应
+                # 注意：这里需要解析工具调用，实际实现可能需要更复杂的逻辑
+                model_response = await self.model.generate(
+                    messages=messages,
+                    tools=tool_definitions if tool_definitions else None
+                )
+
+                yield {
+                    'type': 'model_complete',
+                    'content': model_response.content,
+                    'has_tool_calls': model_response.tool_calls is not None
+                }
+            else:
+                # 非流式模型生成
+                model_response = await self.model.generate(
+                    messages=messages,
+                    tools=tool_definitions if tool_definitions else None
+                )
+
+                yield {
+                    'type': 'model_complete',
+                    'content': model_response.content,
+                    'has_tool_calls': model_response.tool_calls is not None
+                }
+
+            # 检查是否有工具调用
+            if not model_response.tool_calls:
+                yield {
+                    'type': 'complete',
+                    'request_id': request_id,
+                    'requires_confirmation': False,
+                    'content': model_response.content,
+                    'message': '✅ 处理完成，无需工具调用'
+                }
+                return
+
+            # 步骤3: 处理工具调用
+            yield {
+                'type': 'progress',
+                'step': 'tool_processing',
+                'message': f'🔧 正在处理 {len(model_response.tool_calls)} 个工具调用...'
+            }
+
+            results = []
+            for i, tool_call in enumerate(model_response.tool_calls):
+                yield {
+                    'type': 'tool_analysis',
+                    'tool_index': i + 1,
+                    'total_tools': len(model_response.tool_calls),
+                    'tool_name': tool_call["function"]["name"],
+                    'message': f'🛠️ 分析工具调用 {i + 1}/{len(model_response.tool_calls)}: {tool_call["function"]["name"]}'
+                }
+
+                # 流式处理单个工具调用
+                async for chunk in self._process_tool_call_stream(
+                    request_id=request_id,
+                    user_id=user_id,
+                    user_question=user_question,
+                    tool_call=tool_call,
+                    conversation_context=conversation_context,
+                    tool_index=i + 1
+                ):
+                    yield chunk
+
+                # 获取处理结果
+                result = await self._process_tool_call(
+                    request_id=request_id,
+                    user_id=user_id,
+                    user_question=user_question,
+                    tool_call=tool_call,
+                    conversation_context=conversation_context
+                )
+                results.append(result)
+
+            # 最终结果
+            requires_confirmation = any(r["requires_confirmation"] for r in results)
+            max_risk_score = max(r["risk_score"] for r in results)
+
+            yield {
+                'type': 'complete',
+                'request_id': request_id,
+                'requires_confirmation': requires_confirmation,
+                'risk_score': max_risk_score,
+                'tool_calls': results,
+                'content': model_response.content,
+                'routing_info': {
+                    "detected_intents": routing_result["detected_intents"],
+                    "active_domains": routing_result["active_domains"],
+                    "tool_count": len(available_tools)
+                },
+                'message': '🎉 处理完成！' if not requires_confirmation else '⚠️ 请确认是否执行高风险操作'
+            }
+
+        except Exception as e:
+            logger.error(f"Error in stream processing {request_id}: {e}")
+            yield {
+                'type': 'error',
+                'request_id': request_id,
+                'error': str(e),
+                'message': f'❌ 处理过程中出现错误: {str(e)}'
+            }
+
+    async def _process_tool_call_stream(
+        self,
+        request_id: str,
+        user_id: str,
+        user_question: str,
+        tool_call: Dict[str, Any],
+        conversation_context: Optional[List[Message]] = None,
+        tool_index: int = 1
+    ) -> AsyncGenerator[Dict[str, Any], None]:
+        """
+        流式处理单个工具调用
+
+        Args:
+            request_id: 请求ID
+            user_id: 用户ID
+            user_question: 用户问题
+            tool_call: 工具调用信息
+            conversation_context: 对话上下文
+            tool_index: 工具索引
+
+        Yields:
+            Dict[str, Any]: 流式处理数据
+        """
+        tool_name = tool_call["function"]["name"]
+        try:
+            tool_parameters = eval(tool_call["function"]["arguments"])  # 解析JSON
+        except:
+            tool_parameters = {}
+
+        # RAG检索
+        yield {
+            'type': 'rag_retrieval',
+            'tool_index': tool_index,
+            'tool_name': tool_name,
+            'message': '📚 检索相似历史案例...'
+        }
+
+        similar_cases = await self.rag_retriever.retrieve_similar_cases(
+            user_question=user_question,
+            user_id=user_id
+        )
+
+        historical_analysis = self.rag_retriever.analyze_historical_feedback(similar_cases)
+
+        yield {
+            'type': 'rag_complete',
+            'tool_index': tool_index,
+            'similar_cases_count': len(similar_cases),
+            'has_history': historical_analysis.get("has_history", False),
+            'message': f'✅ 找到 {len(similar_cases)} 个相似案例'
+        }
+
+        # 规则检查
+        yield {
+            'type': 'rule_check',
+            'tool_index': tool_index,
+            'tool_name': tool_name,
+            'message': '🛡️ 检查安全规则...'
+        }
+
+        rule_result = self.rule_engine.check_tool_call(
+            tool_name=tool_name,
+            tool_parameters=tool_parameters
+        )
+
+        if rule_result.get("blocked"):
+            yield {
+                'type': 'rule_blocked',
+                'tool_index': tool_index,
+                'tool_name': tool_name,
+                'messages': rule_result.get("messages", []),
+                'message': '❌ 操作被安全规则阻止'
+            }
+            return
+
+        yield {
+            'type': 'rule_complete',
+            'tool_index': tool_index,
+            'matched_rules': len(rule_result.get("matched_rules", [])),
+            'message': '✅ 安全规则检查通过'
+        }
+
+        # 风险评估
+        yield {
+            'type': 'risk_assessment',
+            'tool_index': tool_index,
+            'tool_name': tool_name,
+            'message': '⚖️ 评估操作风险...'
+        }
+
+        risk_result = self.risk_assessor.assess_tool_risk(
+            tool_name=tool_name,
+            tool_parameters=tool_parameters,
+            historical_analysis=historical_analysis,
+            rule_result=rule_result
+        )
+
+        requires_confirmation = (
+            risk_result["requires_confirmation"] or
+            rule_result.get("force_confirm", False)
+        )
+
+        risk_level = risk_result["risk_level"]
+        risk_emoji = {"low": "🟢", "medium": "🟡", "high": "🔴"}.get(risk_level, "⚪")
+
+        yield {
+            'type': 'risk_complete',
+            'tool_index': tool_index,
+            'tool_name': tool_name,
+            'tool_parameters': tool_parameters,
+            'risk_score': risk_result["risk_score"],
+            'risk_level': risk_level,
+            'requires_confirmation': requires_confirmation,
+            'risk_reasons': risk_result["reasons"],
+            'message': f'{risk_emoji} 风险评估完成: {risk_level.upper()} ({risk_result["risk_score"]:.2f})'
+        }
+
+        if requires_confirmation:
+            # 生成确认消息
+            confirmation_message = self._generate_confirmation_message(
+                tool_name=tool_name,
+                tool_parameters=tool_parameters,
+                risk_result=risk_result,
+                historical_analysis=historical_analysis,
+                rule_result=rule_result
+            )
+
+            yield {
+                'type': 'confirmation_required',
+                'tool_index': tool_index,
+                'tool_name': tool_name,
+                'confirmation_message': confirmation_message,
+                'message': '⚠️ 需要用户确认'
+            }
